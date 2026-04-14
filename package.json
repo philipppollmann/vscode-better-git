@@ -1,0 +1,55 @@
+{
+  "name": "vscode-better-git",
+  "displayName": "Better Git",
+  "description": "JetBrains-style Git tool window for VS Code",
+  "version": "0.0.1",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["SCM Providers"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "betterGit",
+          "title": "Better Git",
+          "icon": "media/git-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "betterGit": [
+        {
+          "type": "webview",
+          "id": "betterGit.view",
+          "name": "Better Git"
+        }
+      ]
+    },
+    "commands": [
+      { "command": "betterGit.fetch",        "title": "Fetch",        "icon": "$(cloud-download)" },
+      { "command": "betterGit.pull",         "title": "Pull",         "icon": "$(arrow-down)"     },
+      { "command": "betterGit.push",         "title": "Push",         "icon": "$(arrow-up)"       },
+      { "command": "betterGit.refresh",      "title": "Refresh",      "icon": "$(refresh)"        },
+      { "command": "betterGit.switchBranch", "title": "Switch Branch"                             }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "betterGit.fetch",   "when": "view == betterGit.view", "group": "navigation@1" },
+        { "command": "betterGit.pull",    "when": "view == betterGit.view", "group": "navigation@2" },
+        { "command": "betterGit.push",    "when": "view == betterGit.view", "group": "navigation@3" },
+        { "command": "betterGit.refresh", "when": "view == betterGit.view", "group": "navigation@4" }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.4.0"
+  }
+}
