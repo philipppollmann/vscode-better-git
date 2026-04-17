@@ -1,4 +1,8 @@
 import * as vscode from 'vscode';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 export interface FileChange {
   path: string;        // full fs path (sent to webview via postMessage)
@@ -110,9 +114,73 @@ export class GitService {
     await this._repo.commit(message, { amend });
   }
 
+  private async git(...args: string[]): Promise<string> {
+    const cwd = this._repo.rootUri.fsPath;
+    const { stdout } = await execFileAsync('git', args, { cwd });
+    return stdout.trim();
+  }
+
   async fetch():  Promise<void> { await vscode.commands.executeCommand('git.fetch'); }
   async pull():   Promise<void> { await vscode.commands.executeCommand('git.pull');  }
   async push():   Promise<void> { await vscode.commands.executeCommand('git.push');  }
+
+  async pullWithStats(): Promise<{ commits: number; files: number; alreadyUpToDate: boolean }> {
+    const headBefore = await this.git('rev-parse', 'HEAD');
+    await vscode.commands.executeCommand('git.pull');
+    const headAfter = await this.git('rev-parse', 'HEAD');
+
+    if (headBefore === headAfter) {
+      return { commits: 0, files: 0, alreadyUpToDate: true };
+    }
+
+    const logOutput = await this.git('log', '--oneline', `${headBefore}..${headAfter}`);
+    const commits = logOutput.split('\n').filter(l => l.trim()).length;
+
+    const diffOutput = await this.git('diff', '--name-only', headBefore, headAfter);
+    const files = diffOutput.split('\n').filter(l => l.trim()).length;
+
+    return { commits, files, alreadyUpToDate: false };
+  }
+
+  async pushWithStats(): Promise<{ commits: number; files: number }> {
+    let commits = 0;
+    let files = 0;
+
+    try {
+      const upstream = await this.git('rev-parse', '--abbrev-ref', '@{u}');
+      const logOutput = await this.git('log', '--oneline', `${upstream}..HEAD`);
+      commits = logOutput.split('\n').filter(l => l.trim()).length;
+
+      if (commits > 0) {
+        const diffOutput = await this.git('diff', '--name-only', upstream, 'HEAD');
+        files = diffOutput.split('\n').filter(l => l.trim()).length;
+      }
+    } catch {
+      commits = this._repo.state.HEAD?.ahead ?? 0;
+    }
+
+    await vscode.commands.executeCommand('git.push');
+    return { commits, files };
+  }
+
+  async getFilesToPush(): Promise<{ path: string; label: string; status: string }[]> {
+    try {
+      const upstream = await this.git('rev-parse', '--abbrev-ref', '@{u}');
+      const diffOutput = await this.git('diff', '--name-status', `${upstream}..HEAD`);
+      if (!diffOutput) { return []; }
+      return diffOutput.split('\n').filter(l => l.trim()).map(line => {
+        const [statusChar, ...rest] = line.split('\t');
+        const filePath = rest.join('\t');
+        return {
+          path: filePath,
+          label: filePath,
+          status: statusChar.charAt(0), // M, A, D, R, C
+        };
+      });
+    } catch {
+      return [];
+    }
+  }
 
   async switchBranch(): Promise<void> {
     await vscode.commands.executeCommand('git.checkout');

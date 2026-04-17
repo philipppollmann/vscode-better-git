@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { GitService } from './gitService';
+import { PushConfirmPanel } from './PushConfirmPanel';
 
 export class BetterGitViewProvider implements vscode.WebviewViewProvider {
   private _view: vscode.WebviewView | undefined;
@@ -59,11 +60,30 @@ export class BetterGitViewProvider implements vscode.WebviewViewProvider {
             vscode.window.showErrorMessage('Better Git: Commit message cannot be empty.');
             return;
           }
-          this.setLoading(true, 'Pushing…');
           try {
             await this._git.commit(msg.message, msg.amend ?? false);
             this._view?.webview.postMessage({ type: 'clearCommitMessage' });
-            await this._git.push();
+
+            // Gather files to push and show confirmation panel
+            const files = await this._git.getFilesToPush();
+            const state = this._git.getState();
+            const commitCount = state?.ahead ?? 0;
+
+            if (files.length > 0) {
+              const confirmed = await PushConfirmPanel.show(files, commitCount);
+              if (!confirmed) { break; }
+            }
+
+            this.setLoading(true, 'Pushing…');
+            const stats = await this._git.pushWithStats();
+            this._clearBadge();
+            if (stats.commits > 0) {
+              const c = stats.commits;
+              const f = stats.files;
+              vscode.window.showInformationMessage(
+                `Pushed ${c} commit${c !== 1 ? 's' : ''}, ${f} file${f !== 1 ? 's' : ''} changed.`
+              );
+            }
           } catch (e: any) {
             vscode.window.showErrorMessage(`Commit & Push failed: ${e.message}`);
           } finally {
@@ -81,6 +101,14 @@ export class BetterGitViewProvider implements vscode.WebviewViewProvider {
   }
 
   refresh(): void { this._push(); }
+
+  clearBadge(): void { this._clearBadge(); }
+
+  private _clearBadge(): void {
+    if (this._view) {
+      this._view.badge = undefined;
+    }
+  }
 
   setLoading(loading: boolean, label?: string): void {
     this._view?.webview.postMessage({ type: 'setLoading', loading, label: label ?? '' });
