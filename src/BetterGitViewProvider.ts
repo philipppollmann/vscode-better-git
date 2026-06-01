@@ -92,7 +92,7 @@ export class BetterGitViewProvider implements vscode.WebviewViewProvider {
           break;
         }
         case 'switchBranch':
-          await this._git.switchBranch();
+          await vscode.commands.executeCommand('betterGit.switchBranch');
           break;
       }
     });

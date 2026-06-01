@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { GitService } from './gitService';
 import { BetterGitViewProvider } from './BetterGitViewProvider';
 import { PushConfirmPanel } from './PushConfirmPanel';
+import { showBranchPicker } from './BranchPicker';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const gitService = new GitService(context);
@@ -79,7 +80,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
 
     vscode.commands.registerCommand('betterGit.refresh',      () => provider.refresh()),
-    vscode.commands.registerCommand('betterGit.switchBranch', () => gitService.switchBranch()),
+    vscode.commands.registerCommand('betterGit.switchBranch', () => showBranchPicker(gitService)),
   );
 }
 

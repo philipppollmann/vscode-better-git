@@ -19,6 +19,16 @@ export interface RepoState {
   unstaged: FileChange[];
 }
 
+export interface BranchInfo {
+  name: string;          // 'main' or 'origin/main'
+  isCurrent: boolean;
+  isRemote: boolean;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  lastCommit: number;    // unix timestamp
+}
+
 function statusLabel(status: number): string {
   const map: Record<number, string> = {
     0: 'M',  // INDEX_MODIFIED
@@ -188,5 +198,112 @@ export class GitService {
 
   async openDiff(fsPath: string): Promise<void> {
     await vscode.commands.executeCommand('git.openChange', vscode.Uri.file(fsPath));
+  }
+
+  // -------- Branch management --------
+
+  async listBranches(): Promise<BranchInfo[]> {
+    const fmt = '%(refname)%00%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track)%00%(committerdate:unix)';
+    const out = await this.git(
+      'for-each-ref',
+      `--format=${fmt}`,
+      'refs/heads',
+      'refs/remotes'
+    );
+    if (!out) { return []; }
+
+    const branches: BranchInfo[] = [];
+    for (const line of out.split('\n')) {
+      if (!line.trim()) { continue; }
+      const [refname, short, head, upstream, track, date] = line.split('\0');
+      const isRemote = refname.startsWith('refs/remotes/');
+      // Skip remote HEAD pseudo-ref like 'origin/HEAD'
+      if (isRemote && short.endsWith('/HEAD')) { continue; }
+
+      let ahead = 0;
+      let behind = 0;
+      if (track) {
+        const a = track.match(/ahead (\d+)/);
+        const b = track.match(/behind (\d+)/);
+        if (a) { ahead = parseInt(a[1], 10); }
+        if (b) { behind = parseInt(b[1], 10); }
+      }
+
+      branches.push({
+        name: short,
+        isCurrent: head === '*',
+        isRemote,
+        upstream: upstream || null,
+        ahead,
+        behind,
+        lastCommit: parseInt(date, 10) || 0,
+      });
+    }
+    return branches;
+  }
+
+  async getDefaultBranch(): Promise<string> {
+    // Try origin's HEAD pointer first
+    try {
+      const ref = await this.git('symbolic-ref', '--short', 'refs/remotes/origin/HEAD');
+      return ref.replace(/^origin\//, '');
+    } catch {
+      // Fall back to common defaults
+      for (const candidate of ['main', 'master']) {
+        try {
+          await this.git('rev-parse', '--verify', candidate);
+          return candidate;
+        } catch { /* keep trying */ }
+      }
+      return 'main';
+    }
+  }
+
+  async checkoutBranch(name: string, isRemote: boolean): Promise<void> {
+    if (isRemote) {
+      // e.g. 'origin/feature/x' -> local 'feature/x'
+      const local = name.replace(/^[^/]+\//, '');
+      // If local branch already exists, just check it out
+      try {
+        await this.git('rev-parse', '--verify', `refs/heads/${local}`);
+        await this.git('checkout', local);
+      } catch {
+        await this.git('checkout', '-b', local, '--track', name);
+      }
+    } else {
+      await this.git('checkout', name);
+    }
+  }
+
+  async createBranch(name: string, fromRef?: string): Promise<void> {
+    if (fromRef) {
+      await this.git('checkout', '-b', name, fromRef);
+    } else {
+      await this.git('checkout', '-b', name);
+    }
+  }
+
+  async deleteBranch(name: string, force: boolean): Promise<void> {
+    await this.git('branch', force ? '-D' : '-d', name);
+  }
+
+  async renameBranch(oldName: string, newName: string): Promise<void> {
+    await this.git('branch', '-m', oldName, newName);
+  }
+
+  async mergeInto(source: string): Promise<void> {
+    await this.git('merge', source);
+  }
+
+  async rebaseOnto(target: string): Promise<void> {
+    await this.git('rebase', target);
+  }
+
+  async pushBranch(name?: string): Promise<void> {
+    if (name) {
+      await this.git('push', '-u', 'origin', name);
+    } else {
+      await vscode.commands.executeCommand('git.push');
+    }
   }
 }
