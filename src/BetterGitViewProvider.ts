@@ -317,6 +317,13 @@ body {
 }
 .file-item:hover { background: var(--vscode-list-hoverBackground); }
 
+.file-icon-svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  display: block;
+}
+
 .file-status {
   font-size: 11px;
   font-weight: 700;
@@ -583,9 +590,126 @@ body {
     return { name: label.slice(idx + 1), dir: label.slice(0, idx) };
   }
 
+  // ---- File-type icons ----
+  // Map of extension -> { color, label, textColor }. Inline SVG keeps things simple.
+  const FILE_ICONS = {
+    ts:    { color: '#3178c6', label: 'TS',  text: '#fff' },
+    tsx:   { color: '#3178c6', label: 'TSX', text: '#fff' },
+    js:    { color: '#f0db4f', label: 'JS',  text: '#000' },
+    jsx:   { color: '#61dafb', label: 'JSX', text: '#000' },
+    mjs:   { color: '#f0db4f', label: 'JS',  text: '#000' },
+    cjs:   { color: '#f0db4f', label: 'JS',  text: '#000' },
+    json:  { color: '#cbcb41', label: '{ }', text: '#000' },
+    md:    { color: '#519aba', label: 'MD',  text: '#fff' },
+    html:  { color: '#e34c26', label: '<>',  text: '#fff' },
+    htm:   { color: '#e34c26', label: '<>',  text: '#fff' },
+    css:   { color: '#563d7c', label: '#',   text: '#fff' },
+    scss:  { color: '#c6538c', label: '#',   text: '#fff' },
+    sass:  { color: '#c6538c', label: '#',   text: '#fff' },
+    less:  { color: '#1d365d', label: '#',   text: '#fff' },
+    py:    { color: '#3572a5', label: 'PY',  text: '#fff' },
+    go:    { color: '#00add8', label: 'GO',  text: '#fff' },
+    rs:    { color: '#dea584', label: 'RS',  text: '#000' },
+    java:  { color: '#b07219', label: 'JV',  text: '#fff' },
+    kt:    { color: '#a97bff', label: 'KT',  text: '#fff' },
+    rb:    { color: '#cc342d', label: 'RB',  text: '#fff' },
+    php:   { color: '#4f5d95', label: 'PHP', text: '#fff' },
+    cs:    { color: '#178600', label: 'C#',  text: '#fff' },
+    cpp:   { color: '#00599c', label: 'C++', text: '#fff' },
+    c:     { color: '#555555', label: 'C',   text: '#fff' },
+    h:     { color: '#555555', label: 'H',   text: '#fff' },
+    swift: { color: '#fa7343', label: 'SW',  text: '#fff' },
+    yml:   { color: '#cb171e', label: 'Y',   text: '#fff' },
+    yaml:  { color: '#cb171e', label: 'Y',   text: '#fff' },
+    xml:   { color: '#0060ac', label: 'X',   text: '#fff' },
+    toml:  { color: '#9c4221', label: 'TML', text: '#fff' },
+    ini:   { color: '#6e7681', label: 'INI', text: '#fff' },
+    sh:    { color: '#89e051', label: '$_',  text: '#000' },
+    bash:  { color: '#89e051', label: '$_',  text: '#000' },
+    zsh:   { color: '#89e051', label: '$_',  text: '#000' },
+    svg:   { color: '#ff9800', label: 'SVG', text: '#fff' },
+    png:   { color: '#a074c4', label: 'IMG', text: '#fff' },
+    jpg:   { color: '#a074c4', label: 'IMG', text: '#fff' },
+    jpeg:  { color: '#a074c4', label: 'IMG', text: '#fff' },
+    gif:   { color: '#a074c4', label: 'IMG', text: '#fff' },
+    webp:  { color: '#a074c4', label: 'IMG', text: '#fff' },
+    bmp:   { color: '#a074c4', label: 'IMG', text: '#fff' },
+    ico:   { color: '#a074c4', label: 'ICO', text: '#fff' },
+    pdf:   { color: '#dc3545', label: 'PDF', text: '#fff' },
+    zip:   { color: '#888888', label: 'ZIP', text: '#fff' },
+    tar:   { color: '#888888', label: 'TAR', text: '#fff' },
+    gz:    { color: '#888888', label: 'GZ',  text: '#fff' },
+    lock:  { color: '#6e7681', label: 'LCK', text: '#fff' },
+    env:   { color: '#ecd53f', label: 'ENV', text: '#000' },
+    txt:   { color: '#6e7681', label: 'T',   text: '#fff' },
+    log:   { color: '#6e7681', label: 'LOG', text: '#fff' },
+    sql:   { color: '#dad8d8', label: 'SQL', text: '#000' },
+    vue:   { color: '#41b883', label: 'V',   text: '#fff' },
+    dart:  { color: '#00b4ab', label: 'DT',  text: '#fff' }
+  };
+
+  const SPECIAL_FILES = {
+    'package.json':       { color: '#cb3837', label: 'NPM', text: '#fff' },
+    'package-lock.json':  { color: '#cb3837', label: 'LCK', text: '#fff' },
+    'tsconfig.json':      { color: '#3178c6', label: 'TS',  text: '#fff' },
+    'readme.md':          { color: '#083fa1', label: 'MD',  text: '#fff' },
+    '.gitignore':         { color: '#f54d27', label: 'GIT', text: '#fff' },
+    '.gitattributes':     { color: '#f54d27', label: 'GIT', text: '#fff' },
+    '.gitmodules':        { color: '#f54d27', label: 'GIT', text: '#fff' },
+    'dockerfile':         { color: '#2496ed', label: 'DKR', text: '#fff' },
+    '.dockerignore':      { color: '#2496ed', label: 'DKR', text: '#fff' },
+    '.env':               { color: '#ecd53f', label: 'ENV', text: '#000' },
+    '.npmrc':             { color: '#cb3837', label: 'NPM', text: '#fff' },
+    '.eslintrc':          { color: '#4b32c3', label: 'ESL', text: '#fff' },
+    '.prettierrc':        { color: '#ac7eb0', label: 'PRT', text: '#fff' },
+    'license':            { color: '#6e7681', label: 'LIC', text: '#fff' },
+    'makefile':           { color: '#427819', label: 'MK',  text: '#fff' }
+  };
+
+  const DEFAULT_ICON = { color: '#6e7681', label: '\u2022', text: '#fff' };
+
+  function getFileIcon(filename) {
+    const base = (filename.split('/').pop() || '').toLowerCase();
+    if (SPECIAL_FILES[base]) { return SPECIAL_FILES[base]; }
+    // package-lock.json etc. already covered; also handle generic *.lock
+    const dotIdx = base.lastIndexOf('.');
+    if (dotIdx <= 0) { return DEFAULT_ICON; }
+    const ext = base.slice(dotIdx + 1);
+    return FILE_ICONS[ext] || DEFAULT_ICON;
+  }
+
+  function fileIconSvg(filename) {
+    const icon = getFileIcon(filename);
+    const fontSize = icon.label.length >= 3 ? 5 : 7;
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'file-icon-svg');
+    svg.setAttribute('viewBox', '0 0 16 16');
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', '1');
+    rect.setAttribute('y', '2');
+    rect.setAttribute('width', '14');
+    rect.setAttribute('height', '12');
+    rect.setAttribute('rx', '2');
+    rect.setAttribute('fill', icon.color);
+    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text.setAttribute('x', '8');
+    text.setAttribute('y', '11');
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('font-family', '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif');
+    text.setAttribute('font-size', String(fontSize));
+    text.setAttribute('font-weight', '700');
+    text.setAttribute('fill', icon.text);
+    text.textContent = icon.label;
+    svg.appendChild(rect);
+    svg.appendChild(text);
+    return svg;
+  }
+
   function makeItem(file, staged) {
     const li = document.createElement('li');
     li.className = 'file-item';
+
+    const iconEl = fileIconSvg(file.label);
 
     const statusSpan = document.createElement('span');
     statusSpan.className = 'file-status s-' + file.statusLabel;
@@ -609,6 +733,7 @@ body {
       vscode.postMessage({ type: 'openDiff', path: file.path, staged });
     });
 
+    li.appendChild(iconEl);
     li.appendChild(statusSpan);
     li.appendChild(nameSpan);
     if (dir) {
