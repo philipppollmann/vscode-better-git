@@ -2,7 +2,7 @@
   "name": "vscode-better-git",
   "displayName": "Better Git",
   "description": "JetBrains-style Git tool window for VS Code",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "engines": { "vscode": "^1.80.0" },
   "categories": ["SCM Providers"],
   "activationEvents": ["onStartupFinished"],
@@ -29,16 +29,44 @@
     "commands": [
       { "command": "betterGit.fetch",        "title": "Fetch",        "icon": "$(cloud-download)" },
       { "command": "betterGit.pull",         "title": "Pull",         "icon": "$(arrow-down)"     },
+      { "command": "betterGit.pullMerge",    "title": "Pull (Merge)", "icon": "$(git-merge)"      },
+      { "command": "betterGit.pullRebase",   "title": "Pull (Rebase)", "icon": "$(git-pull-request)" },
+      { "command": "betterGit.pullFastForward", "title": "Pull (Fast-Forward Only)", "icon": "$(debug-step-over)" },
       { "command": "betterGit.push",         "title": "Push",         "icon": "$(arrow-up)"       },
       { "command": "betterGit.refresh",      "title": "Refresh",      "icon": "$(refresh)"        },
-      { "command": "betterGit.switchBranch", "title": "Switch Branch"                             }
+      { "command": "betterGit.switchBranch", "title": "Switch Branch"                             },
+      { "command": "betterGit.resolveConflicts", "title": "Resolve Merge Conflicts", "icon": "$(git-compare)" }
     ],
+    "configuration": {
+      "title": "Better Git",
+      "properties": {
+        "betterGit.pullStrategy": {
+          "type": "string",
+          "enum": ["merge", "rebase", "ffOnly"],
+          "default": "merge",
+          "description": "Default strategy used by Better Git Pull. Merge uses explicit --no-rebase, so Git does not fail when pull.rebase is not configured."
+        },
+        "betterGit.autoFetch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically fetch in the background so incoming commits can be shown in the Better Git view."
+        },
+        "betterGit.autoFetchIntervalSeconds": {
+          "type": "number",
+          "default": 300,
+          "minimum": 60,
+          "description": "Background fetch interval in seconds."
+        }
+      }
+    },
     "menus": {
       "view/title": [
         { "command": "betterGit.fetch",   "when": "view == betterGit.view", "group": "navigation@1" },
         { "command": "betterGit.pull",    "when": "view == betterGit.view", "group": "navigation@2" },
-        { "command": "betterGit.push",    "when": "view == betterGit.view", "group": "navigation@3" },
-        { "command": "betterGit.refresh", "when": "view == betterGit.view", "group": "navigation@4" }
+        { "command": "betterGit.pullRebase", "when": "view == betterGit.view", "group": "navigation@3" },
+        { "command": "betterGit.push",    "when": "view == betterGit.view", "group": "navigation@4" },
+        { "command": "betterGit.resolveConflicts", "when": "view == betterGit.view", "group": "navigation@5" },
+        { "command": "betterGit.refresh", "when": "view == betterGit.view", "group": "navigation@6" }
       ]
     }
   },

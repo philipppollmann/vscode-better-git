@@ -1,8 +1,12 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
+
+export type PullStrategy = 'merge' | 'rebase' | 'ffOnly';
 
 export interface FileChange {
   path: string;        // full fs path (sent to webview via postMessage)
@@ -15,9 +19,47 @@ export interface RepoState {
   branch: string;
   ahead: number;
   behind: number;
+  conflicts: FileChange[];
   staged: FileChange[];
   unstaged: FileChange[];
 }
+
+export interface PullStats {
+  commits: number;
+  files: number;
+  alreadyUpToDate: boolean;
+}
+
+export interface ConflictSummary {
+  path: string;
+  label: string;
+  conflictCount: number;
+}
+
+export interface ConflictBlock {
+  id: number;
+  startLine: number;
+  oursLabel: string;
+  theirsLabel: string;
+  baseLabel?: string;
+  ours: string[];
+  theirs: string[];
+  base?: string[];
+}
+
+export interface ConflictFile {
+  path: string;
+  label: string;
+  blocks: ConflictBlock[];
+}
+
+export interface ConflictResolution {
+  id: number;
+  choice: 'ours' | 'theirs' | 'both' | 'custom';
+  customLines?: string[];
+}
+
+export type GitOperationState = 'merge' | 'rebase' | 'cherryPick';
 
 export interface BranchInfo {
   name: string;          // 'main' or 'origin/main'
@@ -51,6 +93,17 @@ function statusLabel(status: number): string {
   return map[status] ?? '?';
 }
 
+function isConflictStatus(status: number): boolean {
+  return status >= 12 && status <= 18;
+}
+
+export class GitConflictError extends Error {
+  constructor(message: string, readonly conflictedFiles: ConflictSummary[]) {
+    super(message);
+    this.name = 'GitConflictError';
+  }
+}
+
 export class GitService {
   readonly onDidChange = new vscode.EventEmitter<void>();
 
@@ -66,21 +119,46 @@ export class GitService {
 
     const api = ext.exports.getAPI(1);
 
-    if (api.repositories.length === 0) {
-      await new Promise<void>(resolve => {
-        const d = api.onDidOpenRepository(() => { d.dispose(); resolve(); });
-        setTimeout(resolve, 3000);
-      });
+    // Keep listening for repositories opened later — the git extension can
+    // take a while to discover a repo (slow indexing, late-opened folder).
+    // Without this, the view stays stuck on "No git repository found".
+    this._context.subscriptions.push(
+      api.onDidOpenRepository((repo: any) => this._adoptRepo(repo))
+    );
+
+    if (api.repositories.length > 0) {
+      this._adoptRepo(api.repositories[0]);
+      return true;
     }
 
-    this._repo = api.repositories[0];
-    if (!this._repo) { return false; }
+    // No repo yet — wait briefly, but don't give up permanently if it
+    // doesn't appear: the listener above will pick it up later.
+    await new Promise<void>(resolve => {
+      const timer = setTimeout(resolve, 3000);
+      const d = api.onDidOpenRepository(() => {
+        clearTimeout(timer);
+        d.dispose();
+        resolve();
+      });
+    });
 
-    this._context.subscriptions.push(
-      this._repo.state.onDidChange(() => this.onDidChange.fire())
-    );
-    return true;
+    if (api.repositories.length > 0 && !this._repo) {
+      this._adoptRepo(api.repositories[0]);
+    }
+    return !!this._repo;
   }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _adoptRepo(repo: any): void {
+    if (this._repo || !repo) { return; }
+    this._repo = repo;
+    this._context.subscriptions.push(
+      repo.state.onDidChange(() => this.onDidChange.fire())
+    );
+    this.onDidChange.fire();
+  }
+
+  hasRepo(): boolean { return !!this._repo; }
 
   getState(): RepoState | null {
     if (!this._repo) { return null; }
@@ -93,12 +171,23 @@ export class GitService {
       status: c.status,
     });
 
+    const staged = (s.indexChanges as any[]).map(mapChange);
+    const unstaged = (s.workingTreeChanges as any[]).map(mapChange);
+    const mergeChanges = ((s.mergeChanges as any[] | undefined) ?? []).map(mapChange);
+    const conflictsByPath = new Map<string, FileChange>();
+    for (const c of [...mergeChanges, ...staged, ...unstaged]) {
+      if (isConflictStatus(c.status)) {
+        conflictsByPath.set(c.path, c);
+      }
+    }
+
     return {
       branch:   s.HEAD?.name ?? '(detached)',
       ahead:    s.HEAD?.ahead  ?? 0,
       behind:   s.HEAD?.behind ?? 0,
-      staged:   (s.indexChanges       as any[]).map(mapChange),
-      unstaged: (s.workingTreeChanges as any[]).map(mapChange),
+      conflicts: Array.from(conflictsByPath.values()),
+      staged: staged.filter(c => !isConflictStatus(c.status)),
+      unstaged: unstaged.filter(c => !isConflictStatus(c.status)),
     };
   }
 
@@ -111,7 +200,9 @@ export class GitService {
   }
 
   async stageAll(): Promise<void> {
-    const paths = (this._repo.state.workingTreeChanges as any[]).map((c: any) => c.uri.fsPath);
+    const paths = (this._repo.state.workingTreeChanges as any[])
+      .filter((c: any) => !isConflictStatus(c.status))
+      .map((c: any) => c.uri.fsPath);
     if (paths.length) { await this._repo.add(paths); }
   }
 
@@ -124,19 +215,71 @@ export class GitService {
     await this._repo.commit(message, { amend });
   }
 
-  private async git(...args: string[]): Promise<string> {
-    const cwd = this._repo.rootUri.fsPath;
-    const { stdout } = await execFileAsync('git', args, { cwd });
-    return stdout.trim();
+  private ensureRepo(): any {
+    if (!this._repo) {
+      throw new Error('No git repository found.');
+    }
+    return this._repo;
   }
 
-  async fetch():  Promise<void> { await vscode.commands.executeCommand('git.fetch'); }
-  async pull():   Promise<void> { await vscode.commands.executeCommand('git.pull');  }
+  private get repoRoot(): string {
+    return this.ensureRepo().rootUri.fsPath;
+  }
+
+  private async git(...args: string[]): Promise<string> {
+    try {
+      const { stdout } = await execFileAsync('git', args, {
+        cwd: this.repoRoot,
+        maxBuffer: 20 * 1024 * 1024,
+      });
+      return stdout.trim();
+    } catch (e: any) {
+      const stderr = typeof e.stderr === 'string' ? e.stderr.trim() : '';
+      const stdout = typeof e.stdout === 'string' ? e.stdout.trim() : '';
+      const details = [stderr, stdout].filter(Boolean).join('\n').trim();
+      throw new Error(details || e.message || `git ${args.join(' ')} failed`);
+    }
+  }
+
+  private async refreshRepoState(): Promise<void> {
+    try {
+      await this._repo?.status?.();
+    } catch {
+      // The VS Code git extension also observes the repository; this is only
+      // a best-effort nudge so the Better Git view updates immediately.
+    }
+    this.onDidChange.fire();
+  }
+
+  private async runPossiblyConflictingGit(args: string[]): Promise<string> {
+    try {
+      const out = await this.git(...args);
+      await this.refreshRepoState();
+      return out;
+    } catch (e: any) {
+      await this.refreshRepoState();
+      const conflicts = await this.getConflictSummaries();
+      if (conflicts.length > 0) {
+        throw new GitConflictError(e.message ?? String(e), conflicts);
+      }
+      throw e;
+    }
+  }
+
+  async fetch():  Promise<void> {
+    await this.git('fetch', '--prune');
+    await this.refreshRepoState();
+  }
+
+  async pull(strategy: PullStrategy = 'merge'): Promise<void> {
+    await this.pullWithStats(strategy);
+  }
+
   async push():   Promise<void> { await vscode.commands.executeCommand('git.push');  }
 
-  async pullWithStats(): Promise<{ commits: number; files: number; alreadyUpToDate: boolean }> {
+  async pullWithStats(strategy: PullStrategy = 'merge'): Promise<PullStats> {
     const headBefore = await this.git('rev-parse', 'HEAD');
-    await vscode.commands.executeCommand('git.pull');
+    await this.runPossiblyConflictingGit(this.pullArgs(strategy));
     const headAfter = await this.git('rev-parse', 'HEAD');
 
     if (headBefore === headAfter) {
@@ -150,6 +293,18 @@ export class GitService {
     const files = diffOutput.split('\n').filter(l => l.trim()).length;
 
     return { commits, files, alreadyUpToDate: false };
+  }
+
+  private pullArgs(strategy: PullStrategy): string[] {
+    switch (strategy) {
+      case 'rebase':
+        return ['pull', '--rebase', '--autostash'];
+      case 'ffOnly':
+        return ['pull', '--ff-only'];
+      case 'merge':
+      default:
+        return ['pull', '--no-rebase', '--autostash', '--no-edit'];
+    }
   }
 
   async pushWithStats(): Promise<{ commits: number; files: number }> {
@@ -273,6 +428,7 @@ export class GitService {
     } else {
       await this.git('checkout', name);
     }
+    await this.refreshRepoState();
   }
 
   async createBranch(name: string, fromRef?: string): Promise<void> {
@@ -281,29 +437,313 @@ export class GitService {
     } else {
       await this.git('checkout', '-b', name);
     }
+    await this.refreshRepoState();
   }
 
   async deleteBranch(name: string, force: boolean): Promise<void> {
     await this.git('branch', force ? '-D' : '-d', name);
+    await this.refreshRepoState();
   }
 
   async renameBranch(oldName: string, newName: string): Promise<void> {
     await this.git('branch', '-m', oldName, newName);
+    await this.refreshRepoState();
   }
 
   async mergeInto(source: string): Promise<void> {
-    await this.git('merge', source);
+    await this.runPossiblyConflictingGit(['merge', '--no-edit', source]);
   }
 
   async rebaseOnto(target: string): Promise<void> {
-    await this.git('rebase', target);
+    await this.runPossiblyConflictingGit(['rebase', '--autostash', target]);
+  }
+
+  // -------- Conflict resolution --------
+
+  async getConflictSummaries(): Promise<ConflictSummary[]> {
+    const relPaths = await this.getConflictedRelativePaths();
+    const root = this.repoRoot;
+    const summaries: ConflictSummary[] = [];
+
+    for (const rel of relPaths) {
+      const abs = path.resolve(root, rel);
+      let conflictCount = 0;
+      try {
+        const text = await fs.readFile(abs, 'utf8');
+        conflictCount = parseConflictBlocks(text).length;
+      } catch {
+        // Binary/delete conflicts do not have textual conflict markers.
+      }
+      summaries.push({
+        path: abs,
+        label: rel,
+        conflictCount,
+      });
+    }
+
+    return summaries;
+  }
+
+  async getConflictFiles(): Promise<ConflictFile[]> {
+    const relPaths = await this.getConflictedRelativePaths();
+    const root = this.repoRoot;
+    const files: ConflictFile[] = [];
+
+    for (const rel of relPaths) {
+      const abs = path.resolve(root, rel);
+      let blocks: ConflictBlock[] = [];
+      try {
+        const text = await fs.readFile(abs, 'utf8');
+        blocks = parseConflictBlocks(text).map(stripParserMetadata);
+      } catch {
+        // Binary/delete conflicts are still shown, but need the regular editor.
+      }
+      files.push({ path: abs, label: rel, blocks });
+    }
+
+    return files;
+  }
+
+  async resolveConflictFile(fsPath: string, resolutions: ConflictResolution[]): Promise<void> {
+    const abs = this.assertInsideRepo(fsPath);
+    const text = await fs.readFile(abs, 'utf8');
+    const { lines, eol } = splitText(text);
+    const blocks = parseConflictBlocks(text);
+
+    if (blocks.length === 0) {
+      throw new Error('No text conflict markers found in this file.');
+    }
+
+    const byId = new Map(resolutions.map(r => [r.id, r]));
+    const merged: string[] = [];
+    let cursor = 0;
+
+    for (const block of blocks) {
+      while (cursor < block.startIndex) {
+        merged.push(lines[cursor]);
+        cursor += 1;
+      }
+
+      const resolution = byId.get(block.id);
+      if (!resolution) {
+        throw new Error(`Missing resolution for conflict at line ${block.startLine}.`);
+      }
+      merged.push(...linesForResolution(block, resolution));
+      cursor = block.endIndex + 1;
+    }
+
+    while (cursor < lines.length) {
+      merged.push(lines[cursor]);
+      cursor += 1;
+    }
+
+    await fs.writeFile(abs, merged.join(eol), 'utf8');
+    await this.git('add', '--', abs);
+    await this.refreshRepoState();
+  }
+
+  async getOperationState(): Promise<GitOperationState | null> {
+    const gitDir = await this.getGitDir();
+    if (await exists(path.join(gitDir, 'rebase-merge')) || await exists(path.join(gitDir, 'rebase-apply'))) {
+      return 'rebase';
+    }
+    if (await exists(path.join(gitDir, 'MERGE_HEAD'))) {
+      return 'merge';
+    }
+    if (await exists(path.join(gitDir, 'CHERRY_PICK_HEAD'))) {
+      return 'cherryPick';
+    }
+    return null;
+  }
+
+  async completeCurrentOperation(): Promise<GitOperationState> {
+    const conflicts = await this.getConflictSummaries();
+    if (conflicts.length > 0) {
+      throw new Error(`${conflicts.length} conflicted file${conflicts.length !== 1 ? 's' : ''} still need resolution.`);
+    }
+
+    const op = await this.getOperationState();
+    if (!op) {
+      throw new Error('No merge, rebase, or cherry-pick operation is in progress.');
+    }
+
+    if (op === 'rebase') {
+      await this.runPossiblyConflictingGit(['-c', 'core.editor=true', 'rebase', '--continue']);
+    } else if (op === 'merge') {
+      await this.git('commit', '--no-edit');
+      await this.refreshRepoState();
+    } else {
+      await this.runPossiblyConflictingGit(['-c', 'core.editor=true', 'cherry-pick', '--continue']);
+    }
+
+    return op;
+  }
+
+  async abortCurrentOperation(): Promise<GitOperationState> {
+    const op = await this.getOperationState();
+    if (!op) {
+      throw new Error('No merge, rebase, or cherry-pick operation is in progress.');
+    }
+
+    if (op === 'rebase') {
+      await this.git('rebase', '--abort');
+    } else if (op === 'merge') {
+      await this.git('merge', '--abort');
+    } else {
+      await this.git('cherry-pick', '--abort');
+    }
+    await this.refreshRepoState();
+    return op;
+  }
+
+  private async getConflictedRelativePaths(): Promise<string[]> {
+    try {
+      const out = await this.git('diff', '--name-only', '-z', '--diff-filter=U');
+      return out.split('\0').filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  private async getGitDir(): Promise<string> {
+    const gitDir = await this.git('rev-parse', '--git-dir');
+    return path.isAbsolute(gitDir) ? gitDir : path.resolve(this.repoRoot, gitDir);
+  }
+
+  private assertInsideRepo(fsPath: string): string {
+    const root = path.resolve(this.repoRoot);
+    const abs = path.resolve(fsPath);
+    const rel = path.relative(root, abs);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      throw new Error('Refusing to write outside the repository.');
+    }
+    return abs;
   }
 
   async pushBranch(name?: string): Promise<void> {
     if (name) {
       await this.git('push', '-u', 'origin', name);
+      await this.refreshRepoState();
     } else {
       await vscode.commands.executeCommand('git.push');
     }
+  }
+}
+
+interface ParsedConflictBlock extends ConflictBlock {
+  startIndex: number;
+  endIndex: number;
+}
+
+function splitText(text: string): { lines: string[]; eol: string } {
+  return {
+    lines: text.split(/\r?\n/),
+    eol: text.includes('\r\n') ? '\r\n' : '\n',
+  };
+}
+
+function parseConflictBlocks(text: string): ParsedConflictBlock[] {
+  const { lines } = splitText(text);
+  const blocks: ParsedConflictBlock[] = [];
+  let i = 0;
+  let id = 1;
+
+  while (i < lines.length) {
+    if (!lines[i].startsWith('<<<<<<<')) {
+      i += 1;
+      continue;
+    }
+
+    const startIndex = i;
+    const startLine = i + 1;
+    const oursLabel = markerLabel(lines[i], '<<<<<<<', 'Yours');
+    i += 1;
+
+    const ours: string[] = [];
+    const base: string[] = [];
+    const theirs: string[] = [];
+    let baseLabel: string | undefined;
+
+    while (i < lines.length && !lines[i].startsWith('=======') && !lines[i].startsWith('|||||||')) {
+      ours.push(lines[i]);
+      i += 1;
+    }
+
+    if (i < lines.length && lines[i].startsWith('|||||||')) {
+      baseLabel = markerLabel(lines[i], '|||||||', 'Base');
+      i += 1;
+      while (i < lines.length && !lines[i].startsWith('=======')) {
+        base.push(lines[i]);
+        i += 1;
+      }
+    }
+
+    if (i >= lines.length || !lines[i].startsWith('=======')) {
+      break;
+    }
+    i += 1;
+
+    while (i < lines.length && !lines[i].startsWith('>>>>>>>')) {
+      theirs.push(lines[i]);
+      i += 1;
+    }
+
+    if (i >= lines.length || !lines[i].startsWith('>>>>>>>')) {
+      break;
+    }
+
+    const theirsLabel = markerLabel(lines[i], '>>>>>>>', 'Incoming');
+    const endIndex = i;
+    i += 1;
+
+    blocks.push({
+      id,
+      startLine,
+      startIndex,
+      endIndex,
+      oursLabel,
+      theirsLabel,
+      baseLabel,
+      ours,
+      theirs,
+      base: base.length ? base : undefined,
+    });
+    id += 1;
+  }
+
+  return blocks;
+}
+
+function markerLabel(line: string, marker: string, fallback: string): string {
+  const label = line.slice(marker.length).trim();
+  return label || fallback;
+}
+
+function stripParserMetadata(block: ParsedConflictBlock): ConflictBlock {
+  const { startIndex: _startIndex, endIndex: _endIndex, ...publicBlock } = block;
+  return publicBlock;
+}
+
+function linesForResolution(block: ConflictBlock, resolution: ConflictResolution): string[] {
+  switch (resolution.choice) {
+    case 'ours':
+      return block.ours;
+    case 'theirs':
+      return block.theirs;
+    case 'both':
+      return [...block.ours, ...block.theirs];
+    case 'custom':
+      return resolution.customLines ?? [];
+    default:
+      return [];
+  }
+}
+
+async function exists(fsPath: string): Promise<boolean> {
+  try {
+    await fs.access(fsPath);
+    return true;
+  } catch {
+    return false;
   }
 }

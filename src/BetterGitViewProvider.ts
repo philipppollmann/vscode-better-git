@@ -91,6 +91,15 @@ export class BetterGitViewProvider implements vscode.WebviewViewProvider {
           }
           break;
         }
+        case 'pull':
+          await vscode.commands.executeCommand('betterGit.pull');
+          break;
+        case 'pullRebase':
+          await vscode.commands.executeCommand('betterGit.pullRebase');
+          break;
+        case 'resolveConflicts':
+          await vscode.commands.executeCommand('betterGit.resolveConflicts');
+          break;
         case 'switchBranch':
           await vscode.commands.executeCommand('betterGit.switchBranch');
           break;
@@ -119,10 +128,18 @@ export class BetterGitViewProvider implements vscode.WebviewViewProvider {
     const state = this._git.getState();
 
     // Update activity bar badge with total number of changes
+    const conflicts = state?.conflicts.length ?? 0;
     const total = (state?.staged.length ?? 0) + (state?.unstaged.length ?? 0);
-    this._view.badge = total > 0
-      ? { value: total, tooltip: `${total} change${total !== 1 ? 's' : ''}` }
-      : undefined;
+    const behind = state?.behind ?? 0;
+    if (conflicts > 0) {
+      this._view.badge = { value: conflicts, tooltip: `${conflicts} conflict${conflicts !== 1 ? 's' : ''}` };
+    } else if (total > 0) {
+      this._view.badge = { value: total, tooltip: `${total} change${total !== 1 ? 's' : ''}` };
+    } else if (behind > 0) {
+      this._view.badge = { value: behind, tooltip: `${behind} incoming commit${behind !== 1 ? 's' : ''}` };
+    } else {
+      this._view.badge = undefined;
+    }
 
     this._view.webview.postMessage({ type: 'stateUpdate', state });
   }
@@ -196,13 +213,13 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  background: var(--vscode-badge-background, #4d4d4d);
+  background: var(--vscode-testing-iconQueued, var(--vscode-badge-background, #4d4d4d));
   color: var(--vscode-badge-foreground, #fff);
   border-radius: 8px;
   padding: 1px 6px;
   font-size: 11px;
   font-weight: 600;
-  cursor: default;
+  cursor: pointer;
 }
 .sync-behind[title]:hover { opacity: 0.85; }
 
@@ -339,6 +356,16 @@ body {
 .s-U { color: var(--vscode-gitDecoration-untrackedResourceForeground, #73C991); }
 .s-C { color: var(--vscode-gitDecoration-conflictingResourceForeground, #E4676B); }
 .s-B { color: var(--vscode-gitDecoration-conflictingResourceForeground, #E4676B); }
+
+.conflict-header {
+  background: color-mix(in srgb, var(--vscode-gitDecoration-conflictingResourceForeground, #E4676B) 14%, var(--vscode-sideBarSectionHeader-background));
+}
+.conflict-file {
+  background: color-mix(in srgb, var(--vscode-gitDecoration-conflictingResourceForeground, #E4676B) 10%, transparent);
+}
+.conflict-file:hover {
+  background: color-mix(in srgb, var(--vscode-gitDecoration-conflictingResourceForeground, #E4676B) 18%, var(--vscode-list-hoverBackground));
+}
 
 .file-name {
   flex: 1;
@@ -481,6 +508,16 @@ body {
 <div id="scroll-area">
   <div id="no-repo" style="display:none">No git repository found.</div>
 
+  <div class="section-header conflict-header" id="conflicts-hdr" style="display:none">
+    <svg class="chevron" id="conflicts-chv" viewBox="0 0 16 16">
+      <path d="M4 5.5l4 4 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <span class="section-title">Conflicts</span>
+    <span class="section-count" id="conflicts-cnt"></span>
+    <button class="section-action" id="resolve-conflicts-btn">Resolve</button>
+  </div>
+  <ul class="file-list" id="conflicts-list"></ul>
+
   <div class="section-header" id="staged-hdr">
     <svg class="chevron" id="staged-chv" viewBox="0 0 16 16">
       <path d="M4 5.5l4 4 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
@@ -523,12 +560,16 @@ body {
   const syncInfo       = el('sync-info');
   const loadingBar     = el('loading-bar');
   const loadingLabel   = el('loading-label');
+  const conflictsList  = el('conflicts-list');
   const stagedList     = el('staged-list');
   const unstagedList   = el('unstaged-list');
+  const conflictsCnt   = el('conflicts-cnt');
   const stagedCnt      = el('staged-cnt');
   const unstagedCnt    = el('unstaged-cnt');
+  const conflictsHdr   = el('conflicts-hdr');
   const stagedHdr      = el('staged-hdr');
   const unstagedHdr    = el('unstaged-hdr');
+  const conflictsChv   = el('conflicts-chv');
   const stagedChv      = el('staged-chv');
   const unstagedChv    = el('unstaged-chv');
   const commitMsg      = el('commit-msg');
@@ -537,12 +578,17 @@ body {
   const commitPushBtn  = el('commit-push-btn');
   const noRepo         = el('no-repo');
 
+  let conflictsCollapsed = false;
   let stagedCollapsed   = false;
   let unstagedCollapsed = false;
 
   // ---- Collapse / expand ----
   function toggleSection(section) {
-    if (section === 'staged') {
+    if (section === 'conflicts') {
+      conflictsCollapsed = !conflictsCollapsed;
+      conflictsList.style.display = conflictsCollapsed ? 'none' : '';
+      conflictsChv.classList.toggle('collapsed', conflictsCollapsed);
+    } else if (section === 'staged') {
       stagedCollapsed = !stagedCollapsed;
       stagedList.style.display = stagedCollapsed ? 'none' : '';
       stagedChv.classList.toggle('collapsed', stagedCollapsed);
@@ -554,6 +600,10 @@ body {
   }
 
   // KEY FIX: use closest() so clicking button text still matches the button
+  conflictsHdr.addEventListener('click', e => {
+    if (e.target.closest('.section-action')) { return; }
+    toggleSection('conflicts');
+  });
   stagedHdr.addEventListener('click', e => {
     if (e.target.closest('.section-action')) { return; }
     toggleSection('staged');
@@ -570,6 +620,10 @@ body {
   el('stage-all-btn').addEventListener('click', e => {
     e.stopPropagation();
     vscode.postMessage({ type: 'stageAll' });
+  });
+  el('resolve-conflicts-btn').addEventListener('click', e => {
+    e.stopPropagation();
+    vscode.postMessage({ type: 'resolveConflicts' });
   });
 
   branchName.addEventListener('click', () => {
@@ -706,8 +760,9 @@ body {
   }
 
   function makeItem(file, staged) {
+    const isConflict = file.statusLabel === 'C' || file.statusLabel === 'B';
     const li = document.createElement('li');
-    li.className = 'file-item';
+    li.className = 'file-item' + (isConflict ? ' conflict-file' : '');
 
     const iconEl = fileIconSvg(file.label);
 
@@ -722,15 +777,21 @@ body {
 
     const btn = document.createElement('button');
     btn.className = 'stage-btn';
-    btn.title = staged ? 'Unstage' : 'Stage';
-    btn.textContent = staged ? '\u2212' : '+';
+    btn.title = isConflict ? 'Resolve conflict' : staged ? 'Unstage' : 'Stage';
+    btn.textContent = isConflict ? '!' : staged ? '\u2212' : '+';
     btn.addEventListener('click', e => {
       e.stopPropagation();
-      vscode.postMessage({ type: staged ? 'unstageFile' : 'stageFile', path: file.path });
+      if (isConflict) {
+        vscode.postMessage({ type: 'resolveConflicts' });
+      } else {
+        vscode.postMessage({ type: staged ? 'unstageFile' : 'stageFile', path: file.path });
+      }
     });
 
     li.addEventListener('click', () => {
-      vscode.postMessage({ type: 'openDiff', path: file.path, staged });
+      vscode.postMessage(isConflict
+        ? { type: 'resolveConflicts' }
+        : { type: 'openDiff', path: file.path, staged });
     });
 
     li.appendChild(iconEl);
@@ -759,8 +820,11 @@ body {
       noRepo.style.display = '';
       branchName.textContent = 'No repository';
       syncInfo.innerHTML = '';
+      conflictsHdr.style.display = 'none';
+      conflictsList.innerHTML = '';
       stagedList.innerHTML = '';
       unstagedList.innerHTML = '';
+      conflictsCnt.textContent = '';
       stagedCnt.textContent = '';
       unstagedCnt.textContent = '';
       return;
@@ -783,7 +847,18 @@ body {
       s.className = 'sync-behind';
       s.title = state.behind + ' commit' + (state.behind !== 1 ? 's' : '') + ' to pull';
       s.textContent = '\u2193' + state.behind;
+      s.addEventListener('click', () => vscode.postMessage({ type: 'pull' }));
       syncInfo.appendChild(s);
+    }
+
+    // Conflicts
+    const hasConflicts = state.conflicts && state.conflicts.length > 0;
+    conflictsHdr.style.display = hasConflicts ? 'flex' : 'none';
+    conflictsList.style.display = hasConflicts && !conflictsCollapsed ? '' : 'none';
+    conflictsCnt.textContent = hasConflicts ? '(' + state.conflicts.length + ')' : '';
+    conflictsList.innerHTML = '';
+    if (hasConflicts) {
+      state.conflicts.forEach(f => conflictsList.appendChild(makeItem(f, false)));
     }
 
     // Staged

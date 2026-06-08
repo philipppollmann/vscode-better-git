@@ -50,11 +50,11 @@ To install the extension permanently without pressing F5 every time:
    ```bash
    vsce package
    ```
-   This creates a file like `vscode-better-git-0.0.1.vsix`.
+   This creates a file like `vscode-better-git-0.1.0.vsix`.
 
 3. **Install in VS Code**
    ```bash
-   code --install-extension vscode-better-git-0.0.1.vsix
+   code --install-extension vscode-better-git-0.1.0.vsix
    ```
    Or in VS Code: **Extensions → ··· → Install from VSIX…** → select the file.
 
@@ -67,3 +67,26 @@ npm run watch
 ```
 
 After making changes, press `Ctrl+R` in the Extension Development Host to reload the extension.
+
+## Release and Tagging
+
+Feature releases use Conventional Commits in English and version tags.
+
+1. Update the extension version in `package.json` and `package-lock.json`.
+2. Run the verification step:
+   ```bash
+   npm run compile
+   ```
+3. Commit with a Conventional Commit message:
+   ```bash
+   git commit -m "feat: add pull strategies and conflict resolver"
+   ```
+4. Create an annotated version tag that matches the package version:
+   ```bash
+   git tag -a v0.1.0 -m "v0.1.0"
+   ```
+5. Push the branch and the version tag:
+   ```bash
+   git push origin HEAD
+   git push origin v0.1.0
+   ```

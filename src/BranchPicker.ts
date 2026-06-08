@@ -1,10 +1,14 @@
 import * as vscode from 'vscode';
-import { BranchInfo, GitService } from './gitService';
+import { BranchInfo, GitConflictError, GitService } from './gitService';
 
 interface BranchItem extends vscode.QuickPickItem {
   branch?: BranchInfo;
   isNewBranch?: boolean;
 }
+
+const color = (id: string) => new vscode.ThemeColor(id);
+const themeIcon = (icon: string, colorId?: string) =>
+  new vscode.ThemeIcon(icon, colorId ? color(colorId) : undefined);
 
 const NEW_BRANCH_BTN: vscode.QuickInputButton = {
   iconPath: new vscode.ThemeIcon('add'),
@@ -87,11 +91,16 @@ function makeBranchItem(b: BranchInfo): BranchItem {
   if (b.behind) { parts.push(`↓${b.behind}`); }
   const description = parts.join(' · ');
 
-  const iconId = b.isCurrent ? 'star-full' : b.isRemote ? 'cloud' : 'git-branch';
+  const iconPath = b.isCurrent
+    ? themeIcon('star-full', 'charts.yellow')
+    : b.isRemote
+      ? themeIcon('cloud', 'charts.blue')
+      : themeIcon('git-branch', 'charts.purple');
 
   return {
-    label: `$(${iconId}) ${b.name}`,
+    label: b.name,
     description,
+    iconPath,
     branch: b,
     buttons: [ACTIONS_BTN],
   };
@@ -101,6 +110,7 @@ function makeBranchItem(b: BranchInfo): BranchItem {
 
 interface ActionItem extends vscode.QuickPickItem {
   id: string;
+  iconPath?: vscode.ThemeIcon;
 }
 
 async function showBranchActions(
@@ -119,6 +129,14 @@ async function showBranchActions(
   try {
     await runAction(git, branch, defaultBranch, pick.id);
   } catch (e: any) {
+    const conflictedFiles = e instanceof GitConflictError ? e.conflictedFiles : e?.conflictedFiles;
+    if (conflictedFiles?.length) {
+      vscode.window.showWarningMessage(
+        `Git operation stopped with conflicts in ${conflictedFiles.length} file${conflictedFiles.length !== 1 ? 's' : ''}.`
+      );
+      await vscode.commands.executeCommand('betterGit.resolveConflicts');
+      return;
+    }
     vscode.window.showErrorMessage(`Action failed: ${e.message ?? e}`);
   }
 }
@@ -127,30 +145,30 @@ function buildActionItems(b: BranchInfo, def: string): ActionItem[] {
   const items: ActionItem[] = [];
 
   if (b.isCurrent) {
-    items.push({ id: 'pull', label: '$(cloud-download) Pull', detail: 'Fetch and integrate from upstream' });
-    items.push({ id: 'push', label: '$(arrow-up) Push',       detail: 'Push current branch to origin' });
+    items.push({ id: 'pull', iconPath: themeIcon('cloud-download', 'charts.blue'), label: 'Pull', detail: 'Fetch and integrate from upstream' });
+    items.push({ id: 'push', iconPath: themeIcon('arrow-up', 'charts.green'),       label: 'Push', detail: 'Push current branch to origin' });
     if (def && def !== b.name) {
-      items.push({ id: 'mergeFromDefault', label: `$(git-merge) Merge ${def} into this`, detail: `git merge ${def}` });
-      items.push({ id: 'rebaseOntoDefault', label: `$(git-pull-request) Rebase onto ${def}`, detail: `git rebase ${def}` });
+      items.push({ id: 'mergeFromDefault',  iconPath: themeIcon('git-merge', 'charts.purple'),        label: `Merge ${def} into this`, detail: `git merge ${def}` });
+      items.push({ id: 'rebaseOntoDefault', iconPath: themeIcon('git-pull-request', 'charts.yellow'), label: `Rebase onto ${def}`,      detail: `git rebase ${def}` });
     }
-    items.push({ id: 'rename', label: '$(edit) Rename…' });
+    items.push({ id: 'rename', iconPath: themeIcon('edit', 'charts.blue'), label: 'Rename…' });
     return items;
   }
 
   if (b.isRemote) {
-    items.push({ id: 'checkout',       label: '$(arrow-right) Checkout',                 detail: 'Create local tracking branch' });
-    items.push({ id: 'mergeIntoCurrent', label: '$(git-merge) Merge into current',       detail: `git merge ${b.name}` });
-    items.push({ id: 'rebaseCurrent',    label: '$(git-pull-request) Rebase current onto this', detail: `git rebase ${b.name}` });
+    items.push({ id: 'checkout',         iconPath: themeIcon('arrow-right', 'charts.green'),       label: 'Checkout',           detail: 'Create local tracking branch' });
+    items.push({ id: 'mergeIntoCurrent', iconPath: themeIcon('git-merge', 'charts.purple'),        label: 'Merge into current', detail: `git merge ${b.name}` });
+    items.push({ id: 'rebaseCurrent',    iconPath: themeIcon('git-pull-request', 'charts.yellow'), label: 'Rebase current onto this', detail: `git rebase ${b.name}` });
     return items;
   }
 
   // Other local branch
-  items.push({ id: 'checkout',         label: '$(arrow-right) Checkout' });
-  items.push({ id: 'mergeIntoCurrent', label: '$(git-merge) Merge into current', detail: `git merge ${b.name}` });
-  items.push({ id: 'rebaseCurrent',    label: '$(git-pull-request) Rebase current onto this', detail: `git rebase ${b.name}` });
-  items.push({ id: 'push',             label: '$(arrow-up) Push' });
-  items.push({ id: 'rename',           label: '$(edit) Rename…' });
-  items.push({ id: 'delete',           label: '$(trash) Delete' });
+  items.push({ id: 'checkout',         iconPath: themeIcon('arrow-right', 'charts.green'),       label: 'Checkout' });
+  items.push({ id: 'mergeIntoCurrent', iconPath: themeIcon('git-merge', 'charts.purple'),        label: 'Merge into current',       detail: `git merge ${b.name}` });
+  items.push({ id: 'rebaseCurrent',    iconPath: themeIcon('git-pull-request', 'charts.yellow'), label: 'Rebase current onto this', detail: `git rebase ${b.name}` });
+  items.push({ id: 'push',             iconPath: themeIcon('arrow-up', 'charts.green'),          label: 'Push' });
+  items.push({ id: 'rename',           iconPath: themeIcon('edit', 'charts.blue'),               label: 'Rename…' });
+  items.push({ id: 'delete',           iconPath: themeIcon('trash', 'charts.red'),               label: 'Delete' });
   return items;
 }
 
