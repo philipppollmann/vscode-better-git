@@ -3,6 +3,11 @@
   "displayName": "Better Git",
   "description": "JetBrains-style Git tool window for VS Code",
   "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/philipppollmann/vscode-better-git.git"
+  },
   "engines": { "vscode": "^1.80.0" },
   "categories": ["SCM Providers"],
   "activationEvents": ["onStartupFinished"],
